@@ -67,14 +67,19 @@ const fallbackRecords = [
 
 let records = [];
 let drafts = [];
+let deletedRecords = [];
 let selectedId = "";
 let selectedDraftKey = "";
+let selectedRecoveryKey = "";
 let editorOpen = false;
 let draftPanelOpen = false;
+let recoveryPanelOpen = false;
 let editorMode = "record";
 let dataMode = "csv";
 let pendingDraftAction = "";
 let pendingDraftActionExpires = 0;
+let pendingRecordAction = "";
+let pendingRecordActionExpires = 0;
 
 const appConfig = window.APP_CONFIG || {};
 const appsScriptUrl = String(appConfig.APPS_SCRIPT_URL || "").trim();
@@ -141,10 +146,17 @@ const fields = {
   draftsPanel: document.querySelector("#draftsPanel"),
   draftList: document.querySelector("#draftList"),
   draftCount: document.querySelector("#draftCount"),
+  recoveryPanel: document.querySelector("#recoveryPanel"),
+  recoveryList: document.querySelector("#recoveryList"),
+  recoveryCount: document.querySelector("#recoveryCount"),
   newDraft: document.querySelector("#newDraft"),
   toggleDrafts: document.querySelector("#toggleDrafts"),
+  toggleRecovery: document.querySelector("#toggleRecovery"),
   publishDraft: document.querySelector("#publishDraft"),
   deleteDraft: document.querySelector("#deleteDraft"),
+  archiveRecord: document.querySelector("#archiveRecord"),
+  deleteRecord: document.querySelector("#deleteRecord"),
+  restoreRecord: document.querySelector("#restoreRecord"),
   toggleEditor: document.querySelector("#toggleEditor")
 };
 
@@ -196,7 +208,19 @@ function normalizeBackendRecord(record) {
     status: record.status || "Active",
     updatedAt: record.updatedAt || "",
     updatedBy: record.updatedBy || "",
-    reviewedBy: record.reviewedBy || record.updatedBy || ""
+    reviewedBy: record.reviewedBy || record.updatedBy || "",
+    deletedAt: record.deletedAt || "",
+    deletedBy: record.deletedBy || ""
+  };
+}
+
+function normalizeDeletedRecord(record) {
+  const normalized = normalizeBackendRecord(record);
+  return {
+    ...normalized,
+    status: "Deleted",
+    deletedAt: record.deletedAt || normalized.deletedAt || "",
+    deletedBy: record.deletedBy || normalized.deletedBy || ""
   };
 }
 
@@ -221,6 +245,7 @@ async function loadBackendRecords() {
   const data = await backendRequest({ action: "listRecords" });
   searchAliasGroups = normalizeSearchSynonymGroups(data.searchSynonyms);
   drafts = (data.drafts || []).map(normalizeBackendDraft);
+  deletedRecords = (data.deletedRecords || []).map(normalizeDeletedRecord);
   return (data.records || []).map(normalizeBackendRecord);
 }
 
@@ -261,6 +286,38 @@ async function saveRecordToBackend(record) {
     record
   });
   return normalizeBackendRecord(data.record || record);
+}
+
+async function archiveRecordInBackend(recordId) {
+  const data = await backendRequest({
+    action: "archiveRecord",
+    recordId
+  });
+  return normalizeBackendRecord(data.record || {});
+}
+
+async function deleteRecordInBackend(recordId) {
+  const data = await backendRequest({
+    action: "deleteRecord",
+    recordId
+  });
+  return normalizeDeletedRecord(data.deleted || {});
+}
+
+async function restoreArchivedRecordInBackend(recordId) {
+  const data = await backendRequest({
+    action: "restoreArchivedRecord",
+    recordId
+  });
+  return normalizeBackendRecord(data.record || {});
+}
+
+async function restoreDeletedRecordInBackend(recordId) {
+  const data = await backendRequest({
+    action: "restoreDeletedRecord",
+    recordId
+  });
+  return normalizeBackendRecord(data.record || {});
 }
 
 async function replaceBackendRecords(nextRecords) {
@@ -562,12 +619,50 @@ function score(record) {
 }
 
 function filteredRecords() {
-  return records
+  return activeRecords()
     .filter((record) => fields.department.value === "all" || record.department === fields.department.value)
     .filter((record) => fields.system.value === "all" || record.system === fields.system.value)
     .map((record) => ({ record, score: score(record) }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score || a.record.title.localeCompare(b.record.title));
+}
+
+function isArchivedRecord(record) {
+  return normalize(record?.status) === "archived";
+}
+
+function activeRecords() {
+  return records.filter((record) => !isArchivedRecord(record));
+}
+
+function archivedRecords() {
+  return records.filter((record) => isArchivedRecord(record));
+}
+
+function recoveryRecordKey(type, recordId) {
+  return `${type}:${recordId || ""}`;
+}
+
+function recoveryKey(item) {
+  return recoveryRecordKey(item.recoveryType, item.record?.id);
+}
+
+function recoverySortTime(item) {
+  const record = item.record || {};
+  return Date.parse(record.deletedAt || record.updatedAt || record.reviewed || "") || 0;
+}
+
+function recoveryItems() {
+  return [
+    ...archivedRecords().map((record) => ({ recoveryType: "Archived", record })),
+    ...deletedRecords.map((record) => ({ recoveryType: "Deleted", record }))
+  ].sort((a, b) => recoverySortTime(b) - recoverySortTime(a) || (a.record?.title || "").localeCompare(b.record?.title || ""));
+}
+
+function currentRecoveryItem() {
+  if (!recoveryPanelOpen) return null;
+  const items = recoveryItems();
+  return items.find((item) => recoveryKey(item) === selectedRecoveryKey) || items[0] || null;
 }
 
 function draftKey(draft) {
@@ -583,10 +678,14 @@ function currentRecord() {
   if (editorMode === "draft") {
     return currentDraft()?.record || null;
   }
+  if (editorMode === "recovery") {
+    return currentRecoveryItem()?.record || null;
+  }
   if (draftPanelOpen) {
     return null;
   }
-  return records.find((record) => record.id === selectedId) || records[0];
+  const visibleRecords = activeRecords();
+  return visibleRecords.find((record) => record.id === selectedId) || visibleRecords[0] || null;
 }
 
 function clearPendingDraftAction() {
@@ -594,22 +693,48 @@ function clearPendingDraftAction() {
   pendingDraftActionExpires = 0;
 }
 
+function clearPendingRecordAction() {
+  pendingRecordAction = "";
+  pendingRecordActionExpires = 0;
+}
+
 function enterDraftWorkspace(selectKey = "") {
   draftPanelOpen = true;
+  recoveryPanelOpen = false;
   selectedDraftKey = selectKey || (currentDraft() ? selectedDraftKey : (drafts[0] ? draftKey(drafts[0]) : ""));
+  selectedRecoveryKey = "";
   selectedId = "";
   editorMode = "draft";
   editorOpen = false;
   clearPendingDraftAction();
+  clearPendingRecordAction();
 }
 
 function enterRecordWorkspace(recordId = "") {
   draftPanelOpen = false;
+  recoveryPanelOpen = false;
   selectedDraftKey = "";
-  selectedId = recordId || selectedId || records[0]?.id || "";
+  selectedRecoveryKey = "";
+  selectedId = recordId || selectedId || activeRecords()[0]?.id || "";
   editorMode = "record";
   editorOpen = false;
   clearPendingDraftAction();
+  clearPendingRecordAction();
+}
+
+function enterRecoveryWorkspace(selectKey = "") {
+  const items = recoveryItems();
+  draftPanelOpen = false;
+  recoveryPanelOpen = true;
+  selectedDraftKey = "";
+  selectedId = "";
+  selectedRecoveryKey = selectKey || (items.some((item) => recoveryKey(item) === selectedRecoveryKey)
+    ? selectedRecoveryKey
+    : (items[0] ? recoveryKey(items[0]) : ""));
+  editorMode = "recovery";
+  editorOpen = false;
+  clearPendingDraftAction();
+  clearPendingRecordAction();
 }
 
 function selectValues(select) {
@@ -672,6 +797,7 @@ function createLocalDraft() {
   draftPanelOpen = true;
   editorOpen = true;
   clearPendingDraftAction();
+  clearPendingRecordAction();
   render();
 }
 
@@ -699,6 +825,29 @@ function requireDraftActionConfirmation(action, draft) {
 
   pendingDraftAction = `${action}:${draftKey(draft)}`;
   pendingDraftActionExpires = Date.now() + 6000;
+  render();
+  return false;
+}
+
+function recordActionKey(action, record) {
+  if (record?.recoveryType && record?.record) {
+    return `${action}:${record.recoveryType}:${record.record.id || ""}`;
+  }
+  return `${action}:${record?.status || "record"}:${record?.id || ""}`;
+}
+
+function isRecordActionArmed(action, record) {
+  return pendingRecordAction === recordActionKey(action, record) && Date.now() < pendingRecordActionExpires;
+}
+
+function requireRecordActionConfirmation(action, record) {
+  if (isRecordActionArmed(action, record)) {
+    clearPendingRecordAction();
+    return true;
+  }
+
+  pendingRecordAction = recordActionKey(action, record);
+  pendingRecordActionExpires = Date.now() + 6000;
   render();
   return false;
 }
@@ -839,7 +988,7 @@ function renderDrafts() {
   if (!fields.draftsPanel || !fields.draftList) return;
 
   fields.draftsPanel.classList.toggle("hidden", !draftPanelOpen);
-  fields.resultsPanel.classList.toggle("hidden", draftPanelOpen);
+  fields.resultsPanel.classList.toggle("hidden", draftPanelOpen || recoveryPanelOpen);
   if (fields.toggleDrafts) {
     fields.toggleDrafts.textContent = draftPanelOpen ? "Records" : "Drafts";
   }
@@ -876,25 +1025,103 @@ function renderDrafts() {
   });
 }
 
+function recoveryUpdatedText(item) {
+  const record = item.record || {};
+  if (item.recoveryType === "Deleted") {
+    const deleted = formatMetaDate(record.deletedAt) || "Not listed";
+    const editor = usefulMetaValue(record.deletedBy);
+    return editor ? `Deleted ${deleted} by ${editor}` : `Deleted ${deleted}`;
+  }
+
+  const updated = formatMetaDate(record.updatedAt) || "Not listed";
+  const editor = usefulMetaValue(record.updatedBy);
+  return editor ? `Archived ${updated} by ${editor}` : `Archived ${updated}`;
+}
+
+function renderRecovery() {
+  if (!fields.recoveryPanel || !fields.recoveryList) return;
+
+  fields.recoveryPanel.classList.toggle("hidden", !recoveryPanelOpen);
+  if (fields.toggleRecovery) {
+    fields.toggleRecovery.textContent = recoveryPanelOpen ? "Records" : "Recovery";
+  }
+  if (!recoveryPanelOpen) return;
+
+  const items = recoveryItems();
+  if (!items.some((item) => recoveryKey(item) === selectedRecoveryKey)) {
+    selectedRecoveryKey = items[0] ? recoveryKey(items[0]) : "";
+  }
+
+  fields.recoveryCount.textContent = `${items.length} ${items.length === 1 ? "record" : "records"}`;
+  fields.recoveryList.innerHTML = "";
+
+  if (!items.length) {
+    fields.recoveryList.innerHTML = '<div class="draft-empty">No archived or deleted records.</div>';
+    return;
+  }
+
+  items.forEach((item) => {
+    const button = document.createElement("button");
+    const record = item.record || {};
+    const active = recoveryKey(item) === selectedRecoveryKey;
+    button.type = "button";
+    button.className = `recovery-card ${item.recoveryType.toLowerCase()}${active ? " active" : ""}`;
+    button.innerHTML = `
+      <div class="recovery-card-head">
+        <h3>${escapeHtml(record.title || "Untitled record")}</h3>
+        <span class="recovery-pill">${escapeHtml(item.recoveryType)}</span>
+      </div>
+      <p>${escapeHtml(record.solution || record.issues || record.moreInfo || "No record details listed.")}</p>
+      <div class="recovery-card-meta">
+        <span>${escapeHtml(record.department || "General")}</span>
+        <span>${escapeHtml(recoveryUpdatedText(item))}</span>
+      </div>
+    `;
+    button.addEventListener("click", () => {
+      enterRecoveryWorkspace(recoveryKey(item));
+      render();
+    });
+    fields.recoveryList.appendChild(button);
+  });
+}
+
 function renderAnswer(record) {
   const draft = editorMode === "draft" ? currentDraft() : null;
+  const recoveryItem = editorMode === "recovery" ? currentRecoveryItem() : null;
   const isPublishedDraft = normalize(draft?.status) === "published";
   const canPublishDraft = Boolean(draft && !draft.isUnsaved && !isPublishedDraft && dataMode === "google-sheet");
+  const canManageRecord = Boolean(record && !draft && !recoveryItem && dataMode === "google-sheet" && !isArchivedRecord(record));
+  const canRestoreRecord = Boolean(record && recoveryItem && dataMode === "google-sheet");
 
   fields.publishDraft.classList.toggle("hidden", !canPublishDraft);
   fields.deleteDraft.classList.toggle("hidden", !draft);
+  fields.archiveRecord.classList.toggle("hidden", !canManageRecord);
+  fields.deleteRecord.classList.toggle("hidden", !canManageRecord);
+  fields.restoreRecord.classList.toggle("hidden", !canRestoreRecord);
   if (draft) {
     fields.publishDraft.textContent = isDraftActionArmed("publish", draft) ? "Confirm Publish" : "Publish Draft";
     fields.deleteDraft.textContent = isDraftActionArmed("delete", draft)
       ? "Confirm Delete"
       : (draft.isUnsaved ? "Discard Draft" : "Delete Draft");
   }
+  if (canManageRecord) {
+    fields.archiveRecord.textContent = isRecordActionArmed("archive", record) ? "Confirm Archive" : "Archive Record";
+    fields.deleteRecord.textContent = isRecordActionArmed("delete", record) ? "Confirm Delete" : "Delete Record";
+    fields.deleteRecord.classList.toggle("armed", isRecordActionArmed("delete", record));
+  } else {
+    fields.deleteRecord.classList.remove("armed");
+  }
+  if (canRestoreRecord) {
+    fields.restoreRecord.textContent = isRecordActionArmed("restore", recoveryItem) ? "Confirm Restore" : "Restore Record";
+  }
   fields.toggleEditor.textContent = draft ? "Edit Draft" : "Edit Record";
-  fields.toggleEditor.classList.toggle("hidden", !record);
+  fields.toggleEditor.classList.toggle("hidden", !record || Boolean(recoveryItem));
 
   if (!record) {
     fields.title.textContent = "No record selected";
-    fields.meta.textContent = draftPanelOpen ? "Select a draft or create a new one." : "Source pending";
+    fields.meta.textContent = draftPanelOpen
+      ? "Select a draft or create a new one."
+      : (recoveryPanelOpen ? "Select an archived or deleted record." : "Source pending");
     fields.reviewMeta.textContent = "Last updated pending";
     fields.answer.innerHTML = "";
     return;
@@ -907,10 +1134,16 @@ function renderAnswer(record) {
     : `Suggested: ${outputModeLabel(recommendedMode)}`;
 
   fields.title.textContent = record.title;
-  fields.meta.textContent = draft
+  fields.meta.textContent = recoveryItem
+    ? `${recoveryItem.recoveryType} record | ${record.department || "General"} | ${record.system || "No escalation listed"} | ${outputNote}`
+    : draft
     ? `${draft.status || "Draft"} | ${draftVersionLabel(draft)} | ${record.department || "General"} | ${outputNote}`
     : `${record.department} | ${record.system || "No escalation listed"} | ${outputNote}`;
-  fields.reviewMeta.textContent = draft
+  fields.reviewMeta.textContent = recoveryItem?.recoveryType === "Deleted"
+    ? `Deleted: ${formatMetaDate(record.deletedAt) || "Not listed"} | Deleted by: ${usefulMetaValue(record.deletedBy) || "Not listed"}`
+    : recoveryItem?.recoveryType === "Archived"
+    ? `Archived record | ${recordReviewText(record)}`
+    : draft
     ? `Last updated: ${formatMetaDate(draft.updatedAt) || "Not saved yet"} | Reviewed by: ${usefulMetaValue(draft.updatedBy) || "Not listed"}`
     : recordReviewText(record);
   const relatedKbs = displayRelatedKbs(record);
@@ -1074,11 +1307,13 @@ function applyEditorValues(record) {
 }
 
 function render() {
-  fillSelect(fields.department, records.map((record) => record.department));
-  fillSelect(fields.system, records.map((record) => record.system));
+  const visibleRecords = activeRecords();
+  fillSelect(fields.department, visibleRecords.map((record) => record.department));
+  fillSelect(fields.system, visibleRecords.map((record) => record.system));
   const matches = filteredRecords();
   renderResults(matches);
   renderDrafts();
+  renderRecovery();
   const record = currentRecord();
   renderAnswer(record);
   renderEditor(record);
@@ -1207,15 +1442,15 @@ async function loadInitialData() {
       setDataStatus("Google Sheet mode", "ok");
       records = await loadBackendRecords();
       dataMode = "google-sheet";
-      selectedId = records[0]?.id || "";
+      selectedId = activeRecords()[0]?.id || "";
       render();
       return;
     } catch (error) {
       console.error(error);
-      setDataStatus("Sheet unavailable - CSV fallback", "error");
+      setDataStatus("Sheet unavailable - local preview only", "error");
     }
   } else {
-    setDataStatus("CSV mode", "warning");
+    setDataStatus("Google Sheet not configured", "error");
   }
 
   try {
@@ -1225,18 +1460,23 @@ async function loadInitialData() {
   } catch {
     records = structuredClone(fallbackRecords);
   }
+  dataMode = "local-preview";
   drafts = [];
-  selectedId = records[0]?.id || "";
+  selectedId = activeRecords()[0]?.id || "";
   render();
 }
 
 function resetSelectionAndRender() {
   selectedId = "";
   selectedDraftKey = "";
+  selectedRecoveryKey = "";
+  draftPanelOpen = false;
+  recoveryPanelOpen = false;
   editorMode = "record";
   editorOpen = false;
   pendingDraftAction = "";
   pendingDraftActionExpires = 0;
+  clearPendingRecordAction();
   render();
 }
 
@@ -1257,6 +1497,15 @@ fields.toggleDrafts.addEventListener("click", () => {
     enterRecordWorkspace();
   } else {
     enterDraftWorkspace();
+  }
+  render();
+});
+
+fields.toggleRecovery.addEventListener("click", () => {
+  if (recoveryPanelOpen) {
+    enterRecordWorkspace();
+  } else {
+    enterRecoveryWorkspace();
   }
   render();
 });
@@ -1387,43 +1636,78 @@ fields.deleteDraft.addEventListener("click", async () => {
   }
 });
 
-document.querySelector("#csvUpload").addEventListener("change", async (event) => {
-  const [file] = event.target.files;
-  if (!file) return;
-  const imported = parseCsv(await file.text());
-  if (!imported.length) return;
+fields.archiveRecord.addEventListener("click", async () => {
+  const record = currentRecord();
+  if (!record || isArchivedRecord(record)) return;
+  if (!requireRecordActionConfirmation("archive", record)) return;
 
-  if (dataMode === "google-sheet") {
-    const confirmed = confirm("Replace all Google Sheet records with this CSV import? This will write an audit log entry.");
-    if (!confirmed) {
-      event.target.value = "";
-      return;
-    }
-
-    try {
-      setDataStatus("Importing to Google Sheet...", "warning");
-      records = await replaceBackendRecords(imported);
-      setDataStatus("CSV imported to Google Sheet", "ok");
-    } catch (error) {
-      console.error(error);
-      setDataStatus("Import failed", "error");
-      alert(`Unable to import CSV to Google Sheet: ${error.message}`);
-      return;
-    }
-  } else {
-    records = imported;
-    setDataStatus("CSV imported locally", "warning");
+  try {
+    setDataStatus("Archiving record...", "warning");
+    const archivedRecord = await archiveRecordInBackend(record.id);
+    const index = records.findIndex((item) => item.id === archivedRecord.id);
+    if (index >= 0) records[index] = archivedRecord;
+    selectedId = activeRecords()[0]?.id || "";
+    editorOpen = false;
+    setDataStatus("Record archived", "ok");
+    render();
+  } catch (error) {
+    console.error(error);
+    setDataStatus("Archive failed", "error");
+    alert(`Unable to archive this record: ${error.message}`);
   }
-
-  selectedId = records[0].id;
-  selectedDraftKey = "";
-  editorMode = "record";
-  editorOpen = false;
-  pendingDraftAction = "";
-  pendingDraftActionExpires = 0;
-  render();
 });
 
-document.querySelector("#exportCsv").addEventListener("click", downloadCsv);
+fields.deleteRecord.addEventListener("click", async () => {
+  const record = currentRecord();
+  if (!record) return;
+  if (!requireRecordActionConfirmation("delete", record)) return;
+
+  try {
+    setDataStatus("Deleting record...", "warning");
+    const deletedRecord = await deleteRecordInBackend(record.id);
+    deletedRecords = [
+      deletedRecord,
+      ...deletedRecords.filter((item) => item.id !== deletedRecord.id)
+    ];
+    records = records.filter((item) => item.id !== record.id);
+    selectedId = activeRecords()[0]?.id || "";
+    editorOpen = false;
+    setDataStatus("Record moved to Deleted Records", "ok");
+    render();
+  } catch (error) {
+    console.error(error);
+    setDataStatus("Delete failed", "error");
+    alert(`Unable to delete this record: ${error.message}`);
+  }
+});
+
+fields.restoreRecord.addEventListener("click", async () => {
+  const recoveryItem = currentRecoveryItem();
+  const record = recoveryItem?.record;
+  if (!recoveryItem || !record) return;
+  if (!requireRecordActionConfirmation("restore", recoveryItem)) return;
+
+  try {
+    setDataStatus("Restoring record...", "warning");
+    const restoredRecord = recoveryItem.recoveryType === "Deleted"
+      ? await restoreDeletedRecordInBackend(record.id)
+      : await restoreArchivedRecordInBackend(record.id);
+
+    const index = records.findIndex((item) => item.id === restoredRecord.id);
+    if (index >= 0) {
+      records[index] = restoredRecord;
+    } else {
+      records = [restoredRecord, ...records];
+    }
+    deletedRecords = deletedRecords.filter((item) => item.id !== restoredRecord.id);
+    enterRecordWorkspace(restoredRecord.id);
+    setDataStatus("Record restored", "ok");
+    render();
+  } catch (error) {
+    console.error(error);
+    setDataStatus("Restore failed", "error");
+    alert(`Unable to restore this record: ${error.message}`);
+  }
+});
 
 loadInitialData();

@@ -122,6 +122,17 @@ button {
   color: var(--ink);
 }
 
+.button.danger {
+  border-color: var(--red);
+  background: var(--red);
+  color: #ffffff;
+}
+
+.button.danger.armed {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
 .data-status {
   min-height: 38px;
   display: inline-flex;
@@ -157,7 +168,8 @@ button {
 .search-panel,
 .answer-panel,
 .results-panel,
-.drafts-panel {
+.drafts-panel,
+.recovery-panel {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -170,7 +182,8 @@ button {
   box-shadow: var(--shadow);
 }
 
-.drafts-panel {
+.drafts-panel,
+.recovery-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
@@ -179,7 +192,8 @@ button {
   padding: 16px;
 }
 
-.draft-list {
+.draft-list,
+.recovery-list {
   display: grid;
   align-content: start;
   gap: 10px;
@@ -190,7 +204,8 @@ button {
   scrollbar-gutter: stable;
 }
 
-.draft-card {
+.draft-card,
+.recovery-card {
   display: grid;
   gap: 8px;
   width: 100%;
@@ -215,33 +230,46 @@ button {
   box-shadow: 0 0 0 2px rgba(87, 6, 140, 0.14);
 }
 
-.draft-card-head {
+.recovery-card.active {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px rgba(87, 6, 140, 0.14);
+}
+
+.draft-card-head,
+.recovery-card-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
 }
 
-.draft-card h3 {
+.draft-card h3,
+.recovery-card h3 {
   margin: 0;
   font-size: 15px;
   line-height: 1.25;
 }
 
-.draft-card p {
+.draft-card p,
+.recovery-card p {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
 }
 
-.draft-card-meta {
+.draft-card-meta,
+.recovery-card-meta {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 700;
 }
 
-.draft-pill {
+.draft-pill,
+.recovery-pill {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 2px 8px;
@@ -249,6 +277,18 @@ button {
   color: var(--blue);
   font-size: 11px;
   font-weight: 800;
+}
+
+.recovery-card.deleted .recovery-pill {
+  border-color: #edc3c3;
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.recovery-card.archived .recovery-pill {
+  border-color: #ead19a;
+  background: var(--gold-soft);
+  color: var(--gold);
 }
 
 .search-label,
@@ -626,7 +666,8 @@ select,
   }
 
   .results-panel,
-  .drafts-panel {
+  .drafts-panel,
+  .recovery-panel {
     height: clamp(360px, calc(100vh - 330px), 640px);
   }
 }
@@ -650,7 +691,8 @@ select,
   }
 
   .results-panel,
-  .drafts-panel {
+  .drafts-panel,
+  .recovery-panel {
     height: 420px;
   }
 
