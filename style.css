@@ -423,8 +423,30 @@ select,
   line-height: 1.18;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   overflow: hidden;
   overflow-wrap: anywhere;
+}
+
+.result-title {
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.result-status {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--gold);
+  padding: 2px 7px;
+  font-size: 10.5px;
+  font-weight: 800;
+  line-height: 1.2;
 }
 
 .result.active h3 {
