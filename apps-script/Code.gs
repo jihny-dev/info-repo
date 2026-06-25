@@ -18,6 +18,7 @@ const KNOWLEDGE_HEADERS = [
   "Keywords",
   "Escalation",
   "Status",
+  "Archive Reason",
   "Updated At",
   "Updated By"
 ];
@@ -135,7 +136,7 @@ function doPost(e) {
     }
 
     if (action === "archiveRecord") {
-      return jsonResponse({ ok: true, record: archiveRecord_(payload.recordId || payload.id || "") });
+      return jsonResponse({ ok: true, record: archiveRecord_(payload.recordId || payload.id || "", payload.archiveReason || payload.reason || "") });
     }
 
     if (action === "deleteRecord") {
@@ -330,15 +331,23 @@ function saveRecord_(incomingRecord) {
   }
 }
 
-function archiveRecord_(recordId) {
-  return updateRecordStatus_(recordId, "Archived", "archive", "Archived record from website.");
+function archiveRecord_(recordId, archiveReason) {
+  const reason = value_(archiveReason);
+  if (!reason) throw new Error("Archive reason is required.");
+  return updateRecordStatus_(
+    recordId,
+    "Archived",
+    "archive",
+    `Archived record from website. Reason: ${reason}`,
+    { archiveReason: reason }
+  );
 }
 
 function restoreArchivedRecord_(recordId) {
-  return updateRecordStatus_(recordId, "Active", "restore_archive", "Restored archived record to active records.");
+  return updateRecordStatus_(recordId, "Active", "restore_archive", "Restored archived record to active records.", { archiveReason: "" });
 }
 
-function updateRecordStatus_(recordId, status, auditAction, note) {
+function updateRecordStatus_(recordId, status, auditAction, note, updates) {
   const id = value_(recordId);
   if (!id) throw new Error("Record ID is required.");
 
@@ -360,7 +369,7 @@ function updateRecordStatus_(recordId, status, auditAction, note) {
       status,
       updatedAt: new Date().toISOString(),
       updatedBy: getEditorEmail_()
-    });
+    }, updates || {});
     const nextRow = recordToRow_(headers, record, existingRow);
     sheet.getRange(rowNumber, 1, 1, headers.length).setValues([nextRow]);
 
@@ -683,6 +692,7 @@ function normalizeIncomingRecord_(record) {
     keywords: value_(record.keywords),
     escalation,
     status: value_(record.status) || "Active",
+    archiveReason: value_(record.archiveReason),
     updatedAt: value_(record.updatedAt),
     updatedBy: value_(record.updatedBy)
   };
@@ -717,6 +727,7 @@ function rowToRecord_(headers, row) {
     attachments: data["Attachments / Images"] || "",
     relatedKbs,
     status: data["Status"] || "Active",
+    archiveReason: data["Archive Reason"] || "",
     updatedAt: data["Updated At"] || "",
     updatedBy: data["Updated By"] || ""
   };
@@ -735,6 +746,7 @@ function recordToRow_(headers, record, existingRow) {
   setCell_(headers, row, "Keywords", record.keywords);
   setCell_(headers, row, "Escalation", record.escalation);
   setCell_(headers, row, "Status", record.status);
+  setCell_(headers, row, "Archive Reason", record.archiveReason);
   setCell_(headers, row, "Updated At", record.updatedAt);
   setCell_(headers, row, "Updated By", record.updatedBy);
   return row;

@@ -82,11 +82,16 @@ let pendingRecordAction = "";
 let pendingRecordActionExpires = 0;
 let pendingViewTimer = 0;
 let pendingViewKey = "";
+let pendingResultFocusId = "";
+let archiveReasonRecordId = "";
+let archiveReasonText = "";
 const trackedRecordViews = new Map();
 
 const appConfig = window.APP_CONFIG || {};
 const appsScriptUrl = String(appConfig.APPS_SCRIPT_URL || "").trim();
 const backendEnabled = /^https:\/\/script\.google\.com\/(?:macros\/s|a\/macros\/[^/]+\/s)\/.+\/exec$/.test(appsScriptUrl);
+const BACKEND_CACHE_KEY = "stern-it-service-desk:backend-cache:v1";
+const BACKEND_CACHE_VERSION = 1;
 
 const SEARCH_STOP_WORDS = new Set([
   "a",
@@ -160,7 +165,10 @@ const fields = {
   archiveRecord: document.querySelector("#archiveRecord"),
   deleteRecord: document.querySelector("#deleteRecord"),
   restoreRecord: document.querySelector("#restoreRecord"),
-  toggleEditor: document.querySelector("#toggleEditor")
+  toggleEditor: document.querySelector("#toggleEditor"),
+  archiveReasonPanel: document.querySelector("#archiveReasonPanel"),
+  archiveReasonInput: document.querySelector("#archiveReason"),
+  cancelArchiveReason: document.querySelector("#cancelArchiveReason")
 };
 
 function setDataStatus(text, state = "ok") {
@@ -168,6 +176,79 @@ function setDataStatus(text, state = "ok") {
   fields.dataStatus.textContent = text;
   fields.dataStatus.classList.toggle("warning", state === "warning");
   fields.dataStatus.classList.toggle("error", state === "error");
+}
+
+function renderLoadingState() {
+  fields.matchCount.textContent = "Loading records";
+  fields.results.classList.remove("empty-inquiry");
+  fields.results.innerHTML = `
+    <div class="result loading-result" aria-live="polite">
+      <h3>Loading records</h3>
+      <p>Fetching the latest Google Sheet data.</p>
+    </div>
+  `;
+  fields.title.textContent = "Loading records";
+  fields.meta.textContent = "Please wait while the knowledge base refreshes.";
+  fields.reviewMeta.textContent = "";
+  fields.answer.innerHTML = "";
+  fields.editor.classList.add("hidden");
+}
+
+function readBackendCache() {
+  try {
+    const rawCache = localStorage.getItem(BACKEND_CACHE_KEY);
+    if (!rawCache) return null;
+
+    const cache = JSON.parse(rawCache);
+    if (cache.version !== BACKEND_CACHE_VERSION || !Array.isArray(cache.records) || !cache.records.length) {
+      return null;
+    }
+
+    return {
+      cachedAt: cache.cachedAt || "",
+      records: cache.records.map(normalizeBackendRecord),
+      drafts: Array.isArray(cache.drafts) ? cache.drafts.map(normalizeBackendDraft) : [],
+      deletedRecords: Array.isArray(cache.deletedRecords) ? cache.deletedRecords.map(normalizeDeletedRecord) : [],
+      searchAliasGroups: normalizeSearchSynonymGroups(cache.searchAliasGroups)
+    };
+  } catch (error) {
+    console.warn("Cached records could not be read.", error);
+    return null;
+  }
+}
+
+function writeBackendCache() {
+  if (!backendEnabled || dataMode !== "google-sheet" || !records.length) return;
+
+  try {
+    localStorage.setItem(BACKEND_CACHE_KEY, JSON.stringify({
+      version: BACKEND_CACHE_VERSION,
+      cachedAt: new Date().toISOString(),
+      records,
+      drafts,
+      deletedRecords,
+      searchAliasGroups
+    }));
+  } catch (error) {
+    console.warn("Records could not be cached locally.", error);
+  }
+}
+
+function applyBackendCache(cache) {
+  records = cache.records;
+  drafts = cache.drafts;
+  deletedRecords = cache.deletedRecords;
+  searchAliasGroups = cache.searchAliasGroups.length
+    ? cache.searchAliasGroups
+    : DEFAULT_SEARCH_ALIAS_GROUPS.map((group) => group.slice());
+  dataMode = "google-sheet";
+  selectedId = activeRecords().some((record) => record.id === selectedId)
+    ? selectedId
+    : (activeRecords()[0]?.id || "");
+  render();
+
+  const cacheDate = formatMetaDate(cache.cachedAt);
+  setDataStatus(cacheDate ? `Ready - refreshing from ${cacheDate}` : "Ready - refreshing", "warning");
 }
 
 async function backendRequest(payload) {
@@ -212,6 +293,7 @@ function normalizeBackendRecord(record) {
     updatedAt: record.updatedAt || "",
     updatedBy: record.updatedBy || "",
     reviewedBy: record.reviewedBy || record.updatedBy || "",
+    archiveReason: record.archiveReason || "",
     deletedAt: record.deletedAt || "",
     deletedBy: record.deletedBy || ""
   };
@@ -291,10 +373,11 @@ async function saveRecordToBackend(record) {
   return normalizeBackendRecord(data.record || record);
 }
 
-async function archiveRecordInBackend(recordId) {
+async function archiveRecordInBackend(recordId, archiveReason) {
   const data = await backendRequest({
     action: "archiveRecord",
-    recordId
+    recordId,
+    archiveReason
   });
   return normalizeBackendRecord(data.record || {});
 }
@@ -462,6 +545,35 @@ function cleanAttachmentUrl(url) {
   return String(url || "").replace(/[),.;]+$/g, "");
 }
 
+function renderLinkedText(value) {
+  const text = String(value || "");
+  const linkPattern = /https?:\/\/[^\s<>"']+|www\.[^\s<>"']+|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
+  let rendered = "";
+  let lastIndex = 0;
+
+  text.replace(linkPattern, (match, offset) => {
+    rendered += escapeHtml(text.slice(lastIndex, offset));
+
+    const isEmail = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(match);
+    const linkedText = isEmail ? match : cleanAttachmentUrl(match);
+    const trailingText = match.slice(linkedText.length);
+    const href = isEmail
+      ? `mailto:${linkedText}`
+      : linkedText.startsWith("www.")
+      ? `https://${linkedText}`
+      : linkedText;
+    const targetAttrs = isEmail ? "" : ' target="_blank" rel="noopener noreferrer"';
+
+    rendered += `<a class="text-link" href="${escapeHtml(href)}"${targetAttrs}>${escapeHtml(linkedText)}</a>`;
+    rendered += escapeHtml(trailingText);
+    lastIndex = offset + match.length;
+    return match;
+  });
+
+  rendered += escapeHtml(text.slice(lastIndex));
+  return rendered;
+}
+
 function googleDriveFileId(url) {
   try {
     const parsed = new URL(url);
@@ -522,17 +634,17 @@ function renderAttachments(value) {
         if (attachment.type === "image") {
           return `
             <div class="attachment-item">
-              <a class="attachment-image-frame" href="${escapeHtml(attachment.url)}">
+              <a class="attachment-image-frame" href="${escapeHtml(attachment.url)}" target="_blank" rel="noopener noreferrer">
                 <img src="${escapeHtml(attachment.previewUrl)}" alt="${escapeHtml(attachment.title)}" loading="lazy" onerror="this.parentElement.classList.add('is-missing')">
                 <span class="attachment-image-fallback">Preview unavailable. Open image.</span>
               </a>
-              <a class="attachment-link" href="${escapeHtml(attachment.url)}">${escapeHtml(attachment.title)}</a>
+              <a class="attachment-link" href="${escapeHtml(attachment.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(attachment.title)}</a>
             </div>
           `;
         }
 
         return `
-          <a class="attachment-link" href="${escapeHtml(attachment.url)}">${escapeHtml(attachment.title)}</a>
+          <a class="attachment-link" href="${escapeHtml(attachment.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(attachment.title)}</a>
         `;
       }).join("")}
     </div>
@@ -775,6 +887,25 @@ function clearPendingRecordAction() {
   pendingRecordActionExpires = 0;
 }
 
+function clearArchiveReason() {
+  archiveReasonRecordId = "";
+  archiveReasonText = "";
+  if (fields.archiveReasonInput) {
+    fields.archiveReasonInput.value = "";
+    fields.archiveReasonInput.setCustomValidity("");
+  }
+}
+
+function openArchiveReason(record) {
+  if (!record?.id) return;
+  archiveReasonRecordId = record.id;
+  archiveReasonText = "";
+  clearPendingRecordAction();
+  setDataStatus("Archive reason required", "warning");
+  render();
+  window.requestAnimationFrame(() => fields.archiveReasonInput?.focus());
+}
+
 function enterDraftWorkspace(selectKey = "") {
   draftPanelOpen = true;
   recoveryPanelOpen = false;
@@ -785,6 +916,7 @@ function enterDraftWorkspace(selectKey = "") {
   editorOpen = false;
   clearPendingDraftAction();
   clearPendingRecordAction();
+  clearArchiveReason();
 }
 
 function enterRecordWorkspace(recordId = "") {
@@ -797,6 +929,7 @@ function enterRecordWorkspace(recordId = "") {
   editorOpen = false;
   clearPendingDraftAction();
   clearPendingRecordAction();
+  clearArchiveReason();
 }
 
 function enterRecoveryWorkspace(selectKey = "") {
@@ -812,6 +945,7 @@ function enterRecoveryWorkspace(selectKey = "") {
   editorOpen = false;
   clearPendingDraftAction();
   clearPendingRecordAction();
+  clearArchiveReason();
 }
 
 function selectValues(select) {
@@ -1020,6 +1154,61 @@ function usefulEscalationValue(record) {
   return value;
 }
 
+function compactAccessibleText(value, maxLength = 140) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 3).trim()}...`;
+}
+
+function resultAccessibleLabel(record, archived) {
+  const parts = [`Open record: ${record.title || "Untitled record"}`];
+  if (archived) parts.push("Archived");
+  if (record.department) parts.push(`University Service: ${record.department}`);
+  parts.push(`Escalation: ${usefulEscalationValue(record) || "No escalation listed"}`);
+  const summary = compactAccessibleText(record.solution || record.issues || record.moreInfo);
+  if (summary) parts.push(`Summary: ${summary}`);
+  return parts.join(". ");
+}
+
+function resultButtons() {
+  return Array.from(fields.results.querySelectorAll(".result[data-record-id]"));
+}
+
+function focusResultButton(recordId) {
+  const button = resultButtons().find((item) => item.dataset.recordId === recordId);
+  if (button) button.focus({ preventScroll: false });
+}
+
+function handleResultKeydown(event, currentRecordId) {
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  const buttons = resultButtons();
+  if (!buttons.length) return;
+
+  event.preventDefault();
+  let currentIndex = buttons.findIndex((button) => button.dataset.recordId === currentRecordId);
+  if (currentIndex < 0) {
+    currentIndex = buttons.findIndex((button) => button === document.activeElement);
+  }
+  if (currentIndex < 0) currentIndex = 0;
+
+  let nextIndex = currentIndex;
+  if (event.key === "ArrowDown") nextIndex = Math.min(buttons.length - 1, currentIndex + 1);
+  if (event.key === "ArrowUp") nextIndex = Math.max(0, currentIndex - 1);
+  if (event.key === "Home") nextIndex = 0;
+  if (event.key === "End") nextIndex = buttons.length - 1;
+
+  const nextRecordId = buttons[nextIndex]?.dataset.recordId;
+  if (!nextRecordId) return;
+  if (nextRecordId === selectedId) {
+    buttons[nextIndex].focus();
+    return;
+  }
+
+  pendingResultFocusId = nextRecordId;
+  enterRecordWorkspace(nextRecordId);
+  render();
+}
+
 function renderResults(matches) {
   fields.results.innerHTML = "";
   fields.matchCount.textContent = `${matches.length} ${matches.length === 1 ? "record" : "records"}`;
@@ -1038,8 +1227,13 @@ function renderResults(matches) {
   matches.forEach(({ record }) => {
     const button = document.createElement("button");
     const archived = isArchivedRecord(record);
+    const active = record.id === selectedId;
     button.type = "button";
-    button.className = `result${archived ? " archived" : ""}${record.id === selectedId ? " active" : ""}`;
+    button.className = `result${archived ? " archived" : ""}${active ? " active" : ""}`;
+    button.dataset.recordId = record.id;
+    button.tabIndex = active ? 0 : -1;
+    button.setAttribute("aria-label", resultAccessibleLabel(record, archived));
+    button.setAttribute("aria-current", active ? "true" : "false");
     button.innerHTML = `
       <h3>
         <span class="result-title">${escapeHtml(record.title)}</span>
@@ -1051,8 +1245,16 @@ function renderResults(matches) {
       enterRecordWorkspace(record.id);
       render();
     });
+    button.addEventListener("keydown", (event) => handleResultKeydown(event, record.id));
     fields.results.appendChild(button);
   });
+
+  if (pendingResultFocusId) {
+    const focusId = pendingResultFocusId;
+    pendingResultFocusId = "";
+    focusResultButton(focusId);
+    requestAnimationFrame(() => focusResultButton(focusId));
+  }
 }
 
 function draftVersionLabel(draft) {
@@ -1157,6 +1359,7 @@ function renderRecovery() {
         <span>${escapeHtml(record.department || "General")}</span>
         <span>${escapeHtml(recoveryUpdatedText(item))}</span>
       </div>
+      ${item.recoveryType === "Archived" && record.archiveReason ? `<p class="recovery-card-note">Reason: ${escapeHtml(record.archiveReason)}</p>` : ""}
     `;
     button.addEventListener("click", () => {
       enterRecoveryWorkspace(recoveryKey(item));
@@ -1164,6 +1367,14 @@ function renderRecovery() {
     });
     fields.recoveryList.appendChild(button);
   });
+}
+
+function renderArchiveReasonPanel(open) {
+  if (!fields.archiveReasonPanel) return;
+  fields.archiveReasonPanel.classList.toggle("hidden", !open);
+  if (open && fields.archiveReasonInput && fields.archiveReasonInput.value !== archiveReasonText) {
+    fields.archiveReasonInput.value = archiveReasonText;
+  }
 }
 
 function renderAnswer(record) {
@@ -1174,11 +1385,13 @@ function renderAnswer(record) {
   const canPublishDraft = Boolean(draft && !draft.isUnsaved && !isPublishedDraft && dataMode === "google-sheet");
   const canManageRecord = Boolean(record && !draft && !recoveryItem && dataMode === "google-sheet" && !isArchivedRecord(record));
   const canRestoreRecord = Boolean(record && dataMode === "google-sheet" && (recoveryItem || archivedSearchRecord));
+  const canDeleteArchivedRecord = Boolean(record && dataMode === "google-sheet" && recoveryItem?.recoveryType === "Archived");
+  const archiveReasonOpen = Boolean(canManageRecord && archiveReasonRecordId === record?.id);
 
   fields.publishDraft.classList.toggle("hidden", !canPublishDraft);
   fields.deleteDraft.classList.toggle("hidden", !draft);
-  fields.archiveRecord.classList.toggle("hidden", !canManageRecord);
-  fields.deleteRecord.classList.toggle("hidden", !canManageRecord);
+  fields.archiveRecord.classList.toggle("hidden", !canManageRecord || archiveReasonOpen);
+  fields.deleteRecord.classList.toggle("hidden", !canDeleteArchivedRecord);
   fields.restoreRecord.classList.toggle("hidden", !canRestoreRecord);
   if (draft) {
     fields.publishDraft.textContent = isDraftActionArmed("publish", draft) ? "Confirm Publish" : "Publish Draft";
@@ -1187,9 +1400,11 @@ function renderAnswer(record) {
       : (draft.isUnsaved ? "Discard Draft" : "Delete Draft");
   }
   if (canManageRecord) {
-    fields.archiveRecord.textContent = isRecordActionArmed("archive", record) ? "Confirm Archive" : "Archive Record";
-    fields.deleteRecord.textContent = isRecordActionArmed("delete", record) ? "Confirm Delete" : "Delete Record";
-    fields.deleteRecord.classList.toggle("armed", isRecordActionArmed("delete", record));
+    fields.archiveRecord.textContent = "Archive Record";
+  }
+  if (canDeleteArchivedRecord) {
+    fields.deleteRecord.textContent = isRecordActionArmed("delete", recoveryItem) ? "Confirm Delete" : "Delete Record";
+    fields.deleteRecord.classList.toggle("armed", isRecordActionArmed("delete", recoveryItem));
   } else {
     fields.deleteRecord.classList.remove("armed");
   }
@@ -1198,6 +1413,7 @@ function renderAnswer(record) {
   }
   fields.toggleEditor.textContent = draft ? "Edit Draft" : "Edit Record";
   fields.toggleEditor.classList.toggle("hidden", !record || Boolean(recoveryItem) || archivedSearchRecord);
+  renderArchiveReasonPanel(archiveReasonOpen);
 
   if (!record) {
     cancelPendingRecordView();
@@ -1207,6 +1423,7 @@ function renderAnswer(record) {
       : (recoveryPanelOpen ? "Select an archived or deleted record." : "Source pending");
     fields.reviewMeta.textContent = "Last updated pending";
     fields.answer.innerHTML = "";
+    renderArchiveReasonPanel(false);
     return;
   }
 
@@ -1236,25 +1453,32 @@ function renderAnswer(record) {
   const relatedKbs = displayRelatedKbs(record);
   const usefulEscalation = usefulEscalationValue(record);
   const attachmentsHtml = record.attachments ? renderAttachments(record.attachments) : "";
+  const archiveReasonHtml = isArchivedRecord(record) && record.archiveReason ? `
+      <section class="answer-block">
+        <h3>Archive Reason</h3>
+        <p class="prewrap">${renderLinkedText(record.archiveReason)}</p>
+      </section>
+      ` : "";
 
   if (displayMode === "solution") {
     fields.answer.innerHTML = `
+      ${archiveReasonHtml}
       ${record.issues ? `
       <section class="answer-block">
         <h3>Main Issue</h3>
-        <p class="prewrap">${escapeHtml(record.issues)}</p>
+        <p class="prewrap">${renderLinkedText(record.issues)}</p>
       </section>
       ` : ""}
       ${record.solution || !draft ? `
       <section class="answer-block">
         <h3>Resolution</h3>
-        <p class="prewrap">${escapeHtml(record.solution || "No resolution listed.")}</p>
+        <p class="prewrap">${renderLinkedText(record.solution || "No resolution listed.")}</p>
       </section>
       ` : ""}
       ${record.moreInfo ? `
       <section class="answer-block">
         <h3>More Information</h3>
-        <p class="prewrap">${escapeHtml(record.moreInfo)}</p>
+        <p class="prewrap">${renderLinkedText(record.moreInfo)}</p>
       </section>
       ` : ""}
       ${record.attachments ? `
@@ -1266,13 +1490,13 @@ function renderAnswer(record) {
       ${usefulEscalation || !draft ? `
       <section class="answer-block">
         <h3>Escalation</h3>
-        <p class="prewrap">${escapeHtml(usefulEscalation || "No escalation listed.")}</p>
+        <p class="prewrap">${renderLinkedText(usefulEscalation || "No escalation listed.")}</p>
       </section>
       ` : ""}
       ${relatedKbs ? `
       <section class="answer-block">
         <h3>Related KBs</h3>
-        <p class="prewrap">${escapeHtml(relatedKbs)}</p>
+        <p class="prewrap">${renderLinkedText(relatedKbs)}</p>
       </section>
       ` : ""}
     `;
@@ -1280,6 +1504,7 @@ function renderAnswer(record) {
 
   if (displayMode === "checklist") {
     fields.answer.innerHTML = `
+      ${archiveReasonHtml}
       ${record.steps.length || !draft ? `
       <section class="answer-block">
         <h3>Checklist</h3>
@@ -1287,7 +1512,7 @@ function renderAnswer(record) {
           ${record.steps.map((step, index) => `
             <label class="checkline">
               <input type="checkbox">
-              <span>${index + 1}. ${escapeHtml(step)}</span>
+              <span>${index + 1}. ${renderLinkedText(step)}</span>
             </label>
           `).join("")}
         </div>
@@ -1304,24 +1529,25 @@ function renderAnswer(record) {
 
   if (displayMode === "sop") {
     fields.answer.innerHTML = `
+      ${archiveReasonHtml}
       ${record.issues || record.solution || !draft ? `
       <section class="answer-block">
         <h3>Purpose</h3>
-        <p class="prewrap">${escapeHtml(record.issues || record.solution || record.title)}</p>
+        <p class="prewrap">${renderLinkedText(record.issues || record.solution || record.title)}</p>
       </section>
       ` : ""}
       ${record.steps.length || !draft ? `
       <section class="answer-block">
         <h3>Procedure</h3>
         <ol class="steps">
-          ${record.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}
+          ${record.steps.map((step) => `<li>${renderLinkedText(step)}</li>`).join("")}
         </ol>
       </section>
       ` : ""}
       ${record.moreInfo || !draft ? `
       <section class="answer-block">
         <h3>Reference Notes</h3>
-        <p class="prewrap">${escapeHtml(record.moreInfo || "No additional notes listed.")}</p>
+        <p class="prewrap">${renderLinkedText(record.moreInfo || "No additional notes listed.")}</p>
       </section>
       ` : ""}
       ${record.attachments ? `
@@ -1333,13 +1559,13 @@ function renderAnswer(record) {
       ${usefulEscalation || !draft ? `
       <section class="answer-block">
         <h3>Escalation</h3>
-        <p class="prewrap">${escapeHtml(usefulEscalation || "No escalation listed.")}</p>
+        <p class="prewrap">${renderLinkedText(usefulEscalation || "No escalation listed.")}</p>
       </section>
       ` : ""}
       ${relatedKbs || !draft ? `
       <section class="answer-block">
         <h3>Related KBs</h3>
-        <p class="prewrap">${escapeHtml(relatedKbs || "No related KBs listed.")}</p>
+        <p class="prewrap">${renderLinkedText(relatedKbs || "No related KBs listed.")}</p>
       </section>
       ` : ""}
     `;
@@ -1483,6 +1709,7 @@ function parseCsv(text) {
       updatedAt: firstValue(rowObject, ["updatedat", "lastupdated"]) || "",
       updatedBy: firstValue(rowObject, ["updatedby", "reviewedby"]) || "",
       reviewedBy: firstValue(rowObject, ["reviewedby", "updatedby"]) || "",
+      archiveReason: firstValue(rowObject, ["archivereason"]) || "",
       source: relatedKbs || "Topics CSV",
       moreInfo,
       attachments,
@@ -1508,7 +1735,7 @@ function csvEscape(value) {
 }
 
 function exportRows() {
-  const headers = ["id", "title", "department", "system", "severity", "keywords", "issues", "solution", "steps", "moreInfo", "attachments", "relatedKbs", "escalation", "owner", "reviewed", "updatedAt", "updatedBy", "reviewedBy", "source"];
+  const headers = ["id", "title", "department", "system", "severity", "keywords", "issues", "solution", "steps", "moreInfo", "attachments", "relatedKbs", "escalation", "owner", "reviewed", "updatedAt", "updatedBy", "reviewedBy", "archiveReason", "source"];
   return [
     headers.join(","),
     ...records.map((record) => headers.map((key) => csvEscape(record[key])).join(","))
@@ -1527,19 +1754,48 @@ function downloadCsv() {
 
 async function loadInitialData() {
   if (backendEnabled) {
+    const cachedData = readBackendCache();
+    let cacheApplied = false;
+
+    if (cachedData) {
+      applyBackendCache(cachedData);
+      cacheApplied = true;
+    } else {
+      setDataStatus("Refreshing records", "warning");
+      renderLoadingState();
+    }
+
     try {
-      setDataStatus("Google Sheet mode", "ok");
-      records = await loadBackendRecords();
+      const latestRecords = await loadBackendRecords();
       dataMode = "google-sheet";
-      selectedId = activeRecords()[0]?.id || "";
+
+      if (!latestRecords.length && cacheApplied) {
+        setDataStatus("Ready - keeping saved records", "warning");
+        return;
+      }
+
+      records = latestRecords;
+      selectedId = activeRecords().some((record) => record.id === selectedId)
+        ? selectedId
+        : (activeRecords()[0]?.id || "");
       render();
+      if (records.length) {
+        writeBackendCache();
+        setDataStatus("Ready", "ok");
+      } else {
+        setDataStatus("No records found", "warning");
+      }
       return;
     } catch (error) {
       console.error(error);
-      setDataStatus("Sheet unavailable - local preview only", "error");
+      if (cacheApplied) {
+        setDataStatus("Ready - refresh failed", "warning");
+        return;
+      }
+      setDataStatus("Preview only", "error");
     }
   } else {
-    setDataStatus("Google Sheet not configured", "error");
+    setDataStatus("Setup needed", "error");
   }
 
   try {
@@ -1566,6 +1822,7 @@ function resetSelectionAndRender() {
   pendingDraftAction = "";
   pendingDraftActionExpires = 0;
   clearPendingRecordAction();
+  clearArchiveReason();
   render();
 }
 
@@ -1601,6 +1858,7 @@ fields.toggleRecovery.addEventListener("click", () => {
 
 fields.toggleEditor.addEventListener("click", () => {
   editorOpen = !editorOpen;
+  clearArchiveReason();
   render();
 });
 
@@ -1634,7 +1892,7 @@ fields.editor.addEventListener("submit", async (event) => {
           record
         });
         rememberSavedDraft(savedDraft);
-        setDataStatus("Draft version saved to Google Sheet", "ok");
+        setDataStatus("Draft version saved", "ok");
       } else {
         const savedDraft = {
           ...draft,
@@ -1652,11 +1910,12 @@ fields.editor.addEventListener("submit", async (event) => {
       const index = records.findIndex((item) => item.id === record.id);
       if (index >= 0) records[index] = savedRecord;
       selectedId = savedRecord.id;
-      setDataStatus("Saved to Google Sheet", "ok");
+      setDataStatus("Saved", "ok");
     } else {
       setDataStatus("Draft saved locally", "warning");
     }
     editorOpen = false;
+    writeBackendCache();
     render();
   } catch (error) {
     console.error(error);
@@ -1689,6 +1948,7 @@ fields.publishDraft.addEventListener("click", async () => {
     await loadBackendDrafts();
     enterRecordWorkspace(publishedRecord.id);
     setDataStatus("Draft published to records", "ok");
+    writeBackendCache();
     render();
   } catch (error) {
     console.error(error);
@@ -1710,13 +1970,14 @@ fields.deleteDraft.addEventListener("click", async () => {
       setDataStatus("Deleting draft...", "warning");
       await deleteDraftFromBackend(draft.draftId);
       drafts = drafts.filter((item) => item.draftId !== draft.draftId);
-      setDataStatus("Draft deleted from Google Sheet", "ok");
+      setDataStatus("Draft deleted", "ok");
     }
 
     selectedDraftKey = drafts[0] ? draftKey(drafts[0]) : "";
     editorMode = "draft";
     selectedId = "";
     editorOpen = false;
+    writeBackendCache();
     render();
   } catch (error) {
     console.error(error);
@@ -1725,31 +1986,72 @@ fields.deleteDraft.addEventListener("click", async () => {
   }
 });
 
-fields.archiveRecord.addEventListener("click", async () => {
+fields.archiveRecord.addEventListener("click", () => {
   const record = currentRecord();
   if (!record || isArchivedRecord(record)) return;
-  if (!requireRecordActionConfirmation("archive", record)) return;
+  openArchiveReason(record);
+});
 
+fields.archiveReasonInput?.addEventListener("input", () => {
+  archiveReasonText = fields.archiveReasonInput.value;
+  fields.archiveReasonInput.setCustomValidity("");
+});
+
+fields.cancelArchiveReason?.addEventListener("click", () => {
+  clearArchiveReason();
+  setDataStatus("Archive canceled", "warning");
+  render();
+});
+
+fields.archiveReasonPanel?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const record = records.find((item) => item.id === archiveReasonRecordId);
+  const reason = archiveReasonText.trim();
+  if (!record || isArchivedRecord(record)) {
+    clearArchiveReason();
+    render();
+    return;
+  }
+  if (!reason) {
+    fields.archiveReasonInput.setCustomValidity("Archive reason is required.");
+    fields.archiveReasonInput.reportValidity();
+    setDataStatus("Archive reason required", "warning");
+    return;
+  }
+
+  const submitButton = fields.archiveReasonPanel.querySelector("button[type='submit']");
   try {
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.textContent = "Archiving...";
+    }
     setDataStatus("Archiving record...", "warning");
-    const archivedRecord = await archiveRecordInBackend(record.id);
+    const archivedRecord = await archiveRecordInBackend(record.id, reason);
     const index = records.findIndex((item) => item.id === archivedRecord.id);
     if (index >= 0) records[index] = archivedRecord;
     selectedId = activeRecords()[0]?.id || "";
     editorOpen = false;
+    clearArchiveReason();
     setDataStatus("Record archived", "ok");
+    writeBackendCache();
     render();
   } catch (error) {
     console.error(error);
     setDataStatus("Archive failed", "error");
     alert(`Unable to archive this record: ${error.message}`);
+  } finally {
+    if (submitButton) {
+      submitButton.disabled = false;
+      submitButton.textContent = "Confirm Archive";
+    }
   }
 });
 
 fields.deleteRecord.addEventListener("click", async () => {
-  const record = currentRecord();
-  if (!record) return;
-  if (!requireRecordActionConfirmation("delete", record)) return;
+  const recoveryItem = currentRecoveryItem();
+  const record = recoveryItem?.record || null;
+  if (!record || recoveryItem?.recoveryType !== "Archived") return;
+  if (!requireRecordActionConfirmation("delete", recoveryItem)) return;
 
   try {
     setDataStatus("Deleting record...", "warning");
@@ -1759,9 +2061,10 @@ fields.deleteRecord.addEventListener("click", async () => {
       ...deletedRecords.filter((item) => item.id !== deletedRecord.id)
     ];
     records = records.filter((item) => item.id !== record.id);
-    selectedId = activeRecords()[0]?.id || "";
     editorOpen = false;
+    enterRecoveryWorkspace(recoveryRecordKey("Deleted", deletedRecord.id));
     setDataStatus("Record moved to Deleted Records", "ok");
+    writeBackendCache();
     render();
   } catch (error) {
     console.error(error);
@@ -1793,6 +2096,7 @@ fields.restoreRecord.addEventListener("click", async () => {
     deletedRecords = deletedRecords.filter((item) => item.id !== restoredRecord.id);
     enterRecordWorkspace(restoredRecord.id);
     setDataStatus("Record restored", "ok");
+    writeBackendCache();
     render();
   } catch (error) {
     console.error(error);

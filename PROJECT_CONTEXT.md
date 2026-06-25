@@ -79,7 +79,11 @@ Opened records are quietly logged to `Record Views`; this is not shown in the we
 - Search results can include archived records when the Inquiry field has text; archived hits show an `Archived` badge and can be restored.
 - Record view tracking is hidden from the app UI and writes to the `Record Views` Sheet tab.
 - Restore uses a two-click confirmation.
-- Archive/Delete also use two-click confirmation.
+- Archive opens a required reason panel before confirming. Delete uses two-click confirmation.
+
+## Backlog Notes
+
+- Consider adding a review-only duplicate checker later. It should flag likely duplicate records by exact/similar title, matching service/escalation, overlapping issue or resolution text, and reused links/contact info. It should not merge or delete records automatically.
 
 ## Records And Drafts
 

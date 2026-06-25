@@ -45,6 +45,17 @@ button {
   cursor: pointer;
 }
 
+.button:focus-visible,
+.result:focus-visible,
+.draft-card:focus-visible,
+.recovery-card:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid rgba(87, 6, 140, 0.35);
+  outline-offset: 3px;
+}
+
 .app-header {
   display: flex;
   align-items: center;
@@ -497,6 +508,39 @@ select,
   margin-left: auto;
 }
 
+.archive-reason-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--gold);
+  border-radius: 8px;
+  background: var(--gold-soft);
+}
+
+.archive-reason-panel label {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.archive-reason-panel textarea {
+  min-height: 92px;
+  background: #ffffff;
+}
+
+.archive-reason-panel textarea:focus-visible {
+  outline: none;
+  border-color: var(--line);
+}
+
+.archive-reason-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
 .answer-head h2 {
   font-size: 24px;
   line-height: 1.18;
@@ -528,6 +572,17 @@ select,
 .prewrap {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.text-link {
+  color: var(--blue);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.text-link:hover {
+  color: var(--purple);
 }
 
 .attachment-list {
@@ -590,6 +645,15 @@ select,
 .attachment-note {
   margin: 0;
   color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.recovery-card-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
