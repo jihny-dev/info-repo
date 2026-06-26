@@ -19,7 +19,7 @@
         <span id="dataSourceStatus" class="data-status">Connecting</span>
         <button id="newDraft" class="button" type="button">New Draft</button>
         <button id="toggleDrafts" class="button secondary" type="button">Drafts</button>
-        <button id="toggleRecovery" class="button secondary" type="button">Recovery</button>
+        <button id="toggleRecovery" class="button secondary" type="button">Archived</button>
       </div>
     </header>
 
@@ -68,9 +68,9 @@
           <div id="results" class="results"></div>
         </aside>
 
-        <aside id="recoveryPanel" class="recovery-panel hidden" aria-label="Archived and deleted records">
+        <aside id="recoveryPanel" class="recovery-panel hidden" aria-label="Archived records">
           <div class="section-title">
-            <p>Recovery</p>
+            <p>Archived</p>
             <h2 id="recoveryCount">0 records</h2>
           </div>
           <div id="recoveryList" class="recovery-list"></div>
@@ -87,6 +87,7 @@
               <button id="archiveRecord" class="button tertiary hidden" type="button">Archive Record</button>
               <button id="deleteRecord" class="button danger hidden" type="button">Delete Record</button>
               <button id="restoreRecord" class="button hidden" type="button">Restore Record</button>
+              <button id="aiMatch" class="button secondary hidden" type="button">AI Match</button>
               <button id="toggleEditor" class="button tertiary" type="button">Edit Record</button>
             </div>
           </div>
@@ -117,8 +118,8 @@
                 <select name="system"></select>
               </label>
               <label>
-                Related KBs / Source
-                <input name="source" type="text">
+                Keywords / Search Terms
+                <input name="keywords" type="text">
               </label>
               <label class="wide">
                 Main Issues
@@ -133,8 +134,8 @@
                 <textarea name="moreInfo" rows="4"></textarea>
               </label>
               <label class="wide">
-                Attachments / Images
-                <textarea name="attachments" rows="2"></textarea>
+                Attachment Links
+                <textarea name="attachments" rows="2" placeholder="Paste Google Drive screenshot links"></textarea>
               </label>
             </div>
             <div class="editor-actions">

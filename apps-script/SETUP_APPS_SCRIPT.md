@@ -71,6 +71,25 @@ If the cell only contains an image filename such as `G Drive Missing.jpg`, the A
 
 Avoid inserting images directly over cells, because those are sheet objects rather than cell values and the website cannot reliably read them.
 
+## AI Match
+
+AI Match is optional and disabled by default. It compares the current Inquiry text against the top records already found by the website, then returns a human-reviewed recommendation. It does not edit records, publish drafts, archive, delete, or write AI output back to the Sheet.
+
+To enable it:
+
+1. In Apps Script, open `Project Settings > Script properties`.
+2. Add `AI_MATCH_ENABLED` with the value `true`.
+3. Add `OPENAI_API_KEY` with your OpenAI API key.
+4. Optional: add `OPENAI_MODEL` if you want to override the default model.
+5. In `config.js`, set `AI_MATCH_ENABLED: true`.
+6. Save, then deploy a new web app version.
+
+To disable AI Match again, set `AI_MATCH_ENABLED: false` in `config.js` and remove the Apps Script `AI_MATCH_ENABLED` property or set it to `false`, then deploy a new web app version.
+
+The frontend never stores the OpenAI key. The browser sends the intake text and top candidate records to Apps Script, and Apps Script sends that limited context to OpenAI.
+
+Avoid pasting passwords, MFA codes, or other sensitive private data into the Inquiry field before using AI Match.
+
 ## Search Synonyms
 
 The `Search Synonyms` tab controls search aliases without editing website code.
@@ -96,7 +115,7 @@ New records start in the `Drafts` tab. Each save creates a new draft version so 
 
 ## Archive And Delete
 
-Published records can be archived or deleted from the website. Archiving keeps the row in `Knowledge` and sets `Status` to `Archived`, which hides it from normal search results. Deleting moves the row from `Knowledge` into `Deleted Records` with `Deleted At` and `Deleted By` values. The website's Recovery view can restore either archived or deleted records back into active records. These actions write to `Audit Log`.
+Published records can be archived or deleted from the website. Archiving keeps the row in `Knowledge` and sets `Status` to `Archived`, which hides it from normal search results. Deleting moves the row from `Knowledge` into `Deleted Records` with `Deleted At` and `Deleted By` values. The website's Archived view can restore archived records back into active records. Deleted records remain in the backend `Deleted Records` tab for history/audit and are not shown in the website UI after confirmation. These actions write to `Audit Log`.
 
 ## Record Views
 

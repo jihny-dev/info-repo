@@ -52,8 +52,8 @@ Operational data lives in Google Sheets:
 
 Archived records remain in `Knowledge` with `Status = Archived`.
 They are hidden from the default empty Matches list, but included and labeled when the user searches in the Inquiry field.
-Deleted records move from `Knowledge` to `Deleted Records`.
-The website Recovery view can restore both archived and deleted records.
+Deleted records move from `Knowledge` to `Deleted Records` for backend history/audit, but deleted records are not shown in the website UI after confirmation.
+The website Archived view shows archived records that can be restored.
 Opened records are quietly logged to `Record Views`; this is not shown in the website UI.
 
 ## Apps Script Deployment
@@ -74,9 +74,9 @@ Opened records are quietly logged to `Record Views`; this is not shown in the we
 - Font target: NYU Perstare fallback stack.
 - Import/export CSV controls are no longer needed for the hosted version.
 - Record cards use a purple title band and white text body.
-- Matches, Drafts, and Recovery use the left sidebar area.
-- Recovery has its own view and does not show Matches.
-- Search results can include archived records when the Inquiry field has text; archived hits show an `Archived` badge and can be restored.
+- Matches, Drafts, and Archived use the left sidebar area.
+- Archived has its own view and does not show Matches.
+- Search results can include archived records when the Inquiry field has text; archived hits show an `Archived` badge and can be restored. No-result states should suggest broader terms, fewer filters, or alternate client wording. AI Match can compare the Inquiry text with the top search results through Apps Script/OpenAI, should remain read-only/advisory, and is disabled by default unless both `config.js` and Apps Script set `AI_MATCH_ENABLED` to `true`.
 - Record view tracking is hidden from the app UI and writes to the `Record Views` Sheet tab.
 - Restore uses a two-click confirmation.
 - Archive opens a required reason panel before confirming. Delete uses two-click confirmation.
@@ -84,6 +84,7 @@ Opened records are quietly logged to `Record Views`; this is not shown in the we
 ## Backlog Notes
 
 - Consider adding a review-only duplicate checker later. It should flag likely duplicate records by exact/similar title, matching service/escalation, overlapping issue or resolution text, and reused links/contact info. It should not merge or delete records automatically.
+- Consider a draft review phase before publishing. Keep it lightweight: drafts start editable, can be submitted for review, can be sent back for edits or approved, and only approved drafts show a final Publish action. Avoid turning this into a broad draft status system unless the workflow grows.
 
 ## Records And Drafts
 

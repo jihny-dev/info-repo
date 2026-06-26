@@ -85,7 +85,12 @@ let pendingViewKey = "";
 let pendingResultFocusId = "";
 let archiveReasonRecordId = "";
 let archiveReasonText = "";
+let aiMatchState = "idle";
+let aiMatchResult = null;
+let aiMatchError = "";
+let aiMatchSignature = "";
 const DRAFT_AUTOSAVE_DELAY = 1800;
+const NEW_RECORD_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 let draftAutosaveTimer = 0;
 let draftAutosaveInFlight = false;
 let draftAutosaveQueued = false;
@@ -95,6 +100,7 @@ const trackedRecordViews = new Map();
 
 const appConfig = window.APP_CONFIG || {};
 const appsScriptUrl = String(appConfig.APPS_SCRIPT_URL || "").trim();
+const aiMatchEnabled = appConfig.AI_MATCH_ENABLED === true;
 const backendEnabled = /^https:\/\/script\.google\.com\/(?:macros\/s|a\/macros\/[^/]+\/s)\/.+\/exec$/.test(appsScriptUrl);
 const BACKEND_CACHE_KEY = "stern-it-service-desk:backend-cache:v1";
 const BACKEND_CACHE_VERSION = 1;
@@ -171,6 +177,7 @@ const fields = {
   archiveRecord: document.querySelector("#archiveRecord"),
   deleteRecord: document.querySelector("#deleteRecord"),
   restoreRecord: document.querySelector("#restoreRecord"),
+  aiMatch: document.querySelector("#aiMatch"),
   toggleEditor: document.querySelector("#toggleEditor"),
   archiveReasonPanel: document.querySelector("#archiveReasonPanel"),
   archiveReasonInput: document.querySelector("#archiveReason"),
@@ -234,6 +241,7 @@ function renderLoadingState() {
   fields.meta.textContent = "Please wait while the knowledge base refreshes.";
   fields.reviewMeta.textContent = "";
   fields.answer.innerHTML = "";
+  fields.aiMatch?.classList.add("hidden");
   fields.editor.classList.add("hidden");
 }
 
@@ -334,6 +342,7 @@ function normalizeBackendRecord(record) {
     relatedKbs: normalize(record.relatedKbs) === "google sheet" ? "" : (record.relatedKbs || ""),
     status: record.status || "Active",
     updatedAt: record.updatedAt || "",
+    publishedAt: record.publishedAt || "",
     updatedBy: record.updatedBy || "",
     reviewedBy: record.reviewedBy || record.updatedBy || "",
     archiveReason: record.archiveReason || "",
@@ -463,6 +472,15 @@ async function trackRecordViewInBackend(view) {
     view
   });
   return data.view || {};
+}
+
+async function aiMatchInBackend(intake, candidates) {
+  const data = await backendRequest({
+    action: "aiMatch",
+    intake,
+    candidates
+  });
+  return data.match || {};
 }
 
 async function replaceBackendRecords(nextRecords) {
@@ -805,6 +823,16 @@ function isArchivedRecord(record) {
   return normalize(record?.status) === "archived";
 }
 
+function recordNewTimestamp(record) {
+  return Date.parse(record?.publishedAt || record?.updatedAt || "") || 0;
+}
+
+function isNewRecord(record) {
+  if (!record || isArchivedRecord(record)) return false;
+  const age = Date.now() - recordNewTimestamp(record);
+  return age >= 0 && age < NEW_RECORD_WINDOW_MS;
+}
+
 function activeRecords() {
   return records.filter((record) => !isArchivedRecord(record));
 }
@@ -835,10 +863,9 @@ function recoverySortTime(item) {
 }
 
 function recoveryItems() {
-  return [
-    ...archivedRecords().map((record) => ({ recoveryType: "Archived", record })),
-    ...deletedRecords.map((record) => ({ recoveryType: "Deleted", record }))
-  ].sort((a, b) => recoverySortTime(b) - recoverySortTime(a) || (a.record?.title || "").localeCompare(b.record?.title || ""));
+  return archivedRecords()
+    .map((record) => ({ recoveryType: "Archived", record }))
+    .sort((a, b) => recoverySortTime(b) - recoverySortTime(a) || (a.record?.title || "").localeCompare(b.record?.title || ""));
 }
 
 function recordViewSource(record) {
@@ -976,6 +1003,7 @@ function enterDraftWorkspace(selectKey = "") {
   clearDraftAutosave();
   lastDraftAutosaveSignature = "";
   clearArchiveReason();
+  clearAiMatchState();
 }
 
 function enterRecordWorkspace(recordId = "") {
@@ -1009,6 +1037,7 @@ function enterRecoveryWorkspace(selectKey = "") {
   clearDraftAutosave();
   lastDraftAutosaveSignature = "";
   clearArchiveReason();
+  clearAiMatchState();
 }
 
 function selectValues(select) {
@@ -1230,11 +1259,122 @@ function compactAccessibleText(value, maxLength = 140) {
 function resultAccessibleLabel(record, archived) {
   const parts = [`Open record: ${record.title || "Untitled record"}`];
   if (archived) parts.push("Archived");
+  if (isNewRecord(record)) parts.push("New");
   if (record.department) parts.push(`University Service: ${record.department}`);
   parts.push(`Escalation: ${usefulEscalationValue(record) || "No escalation listed"}`);
   const summary = compactAccessibleText(record.solution || record.issues || record.moreInfo);
   if (summary) parts.push(`Summary: ${summary}`);
   return parts.join(". ");
+}
+
+function aiMatchCandidateRecord(item, index) {
+  const record = item.record || {};
+  return {
+    rank: index + 1,
+    score: Math.round(item.score || 0),
+    recordId: record.id || "",
+    title: compactAccessibleText(record.title, 120),
+    universityService: compactAccessibleText(record.department, 120),
+    escalation: compactAccessibleText(record.system || record.escalation, 120),
+    keywords: compactAccessibleText(record.keywords, 220),
+    mainIssue: compactAccessibleText(record.issues, 500),
+    resolution: compactAccessibleText(record.solution, 700),
+    notes: compactAccessibleText(record.moreInfo, 400),
+    attachmentLinks: compactAccessibleText(record.attachments, 250),
+    archived: isArchivedRecord(record)
+  };
+}
+
+function aiMatchCandidates(limit = 5) {
+  if (!normalize(fields.query.value)) return [];
+  return filteredRecords()
+    .slice(0, limit)
+    .map((item, index) => aiMatchCandidateRecord(item, index));
+}
+
+function aiMatchSignatureFor(intake, candidates) {
+  return JSON.stringify({
+    intake: String(intake || "").trim(),
+    candidates: candidates.map((candidate) => [candidate.recordId, candidate.score])
+  });
+}
+
+function normalizeAiMatchResult(result) {
+  const best = result?.bestMatch || {};
+  return {
+    bestMatch: {
+      recordId: best.recordId || "",
+      title: best.title || "No strong match",
+      confidence: best.confidence || "Low",
+      why: best.why || "No rationale returned."
+    },
+    alternateMatches: Array.isArray(result?.alternateMatches) ? result.alternateMatches.slice(0, 3) : [],
+    missingInfo: Array.isArray(result?.missingInfo) ? result.missingInfo.slice(0, 4) : [],
+    notes: result?.notes || ""
+  };
+}
+
+function clearAiMatchState() {
+  aiMatchState = "idle";
+  aiMatchResult = null;
+  aiMatchError = "";
+  aiMatchSignature = "";
+}
+
+function renderAiMatchPanel() {
+  if (aiMatchState === "idle" && !aiMatchResult && !aiMatchError) return "";
+
+  if (aiMatchState === "loading") {
+    return `
+      <section class="answer-block ai-match-panel" aria-live="polite">
+        <h3>AI Match</h3>
+        <p>Comparing this intake with the top matching records.</p>
+      </section>
+    `;
+  }
+
+  if (aiMatchState === "error") {
+    return `
+      <section class="answer-block ai-match-panel ai-match-error" aria-live="polite">
+        <h3>AI Match</h3>
+        <p>${escapeHtml(aiMatchError || "AI Match is unavailable right now.")}</p>
+      </section>
+    `;
+  }
+
+  const result = normalizeAiMatchResult(aiMatchResult);
+  const best = result.bestMatch;
+  const confidenceClass = normalize(best.confidence).replace(/[^a-z0-9-]/g, "") || "low";
+  const alternates = result.alternateMatches
+    .map((item) => `<li><strong>${escapeHtml(item.title || "Alternate match")}</strong>: ${escapeHtml(item.why || item.confidence || "Possible related record.")}</li>`)
+    .join("");
+  const missingInfo = result.missingInfo
+    .map((item) => `<li>${escapeHtml(item)}</li>`)
+    .join("");
+
+  return `
+    <section class="answer-block ai-match-panel" aria-live="polite">
+      <div class="ai-match-heading">
+        <h3>AI Match</h3>
+        <span class="ai-confidence ${escapeHtml(confidenceClass)}">${escapeHtml(best.confidence || "Low")}</span>
+      </div>
+      <p><strong>Best fit:</strong> ${escapeHtml(best.title || "No strong match")}</p>
+      <p class="prewrap"><strong>Why:</strong> ${escapeHtml(best.why || "No rationale returned.")}</p>
+      ${alternates ? `
+      <div class="ai-match-list">
+        <h4>Other possible matches</h4>
+        <ul>${alternates}</ul>
+      </div>
+      ` : ""}
+      ${missingInfo ? `
+      <div class="ai-match-list">
+        <h4>Missing info to ask</h4>
+        <ul>${missingInfo}</ul>
+      </div>
+      ` : ""}
+      ${result.notes ? `<p class="ai-match-note">${escapeHtml(result.notes)}</p>` : ""}
+    </section>
+  `;
 }
 
 function resultButtons() {
@@ -1287,16 +1427,25 @@ function renderResults(matches) {
   }
 
   if (!matches.length) {
-    fields.results.innerHTML = '<div class="result"><h3>No match found</h3><p>Try fewer filters or broader wording.</p></div>';
+    const emptyHint = hasInquiry
+      ? "Try broader wording, fewer filters, or another term a client might use. Archived records were checked too."
+      : "Try typing a keyword or clearing filters. Archived records appear when searching.";
+    fields.results.innerHTML = `
+      <div class="search-empty" role="status">
+        <h3>No match found</h3>
+        <p>${emptyHint}</p>
+      </div>
+    `;
     return;
   }
 
   matches.forEach(({ record }) => {
     const button = document.createElement("button");
     const archived = isArchivedRecord(record);
+    const fresh = isNewRecord(record);
     const active = record.id === selectedId;
     button.type = "button";
-    button.className = `result${archived ? " archived" : ""}${active ? " active" : ""}`;
+    button.className = `result${archived ? " archived" : ""}${fresh ? " new" : ""}${active ? " active" : ""}`;
     button.dataset.recordId = record.id;
     button.tabIndex = active ? 0 : -1;
     button.setAttribute("aria-label", resultAccessibleLabel(record, archived));
@@ -1304,6 +1453,7 @@ function renderResults(matches) {
     button.innerHTML = `
       <h3>
         <span class="result-title">${escapeHtml(record.title)}</span>
+        ${fresh ? '<span class="result-status result-status-new">New</span>' : ""}
         ${archived ? '<span class="result-status">Archived</span>' : ""}
       </h3>
       <p>${escapeHtml(record.solution || record.issues || record.moreInfo)}</p>
@@ -1393,7 +1543,7 @@ function renderRecovery() {
 
   fields.recoveryPanel.classList.toggle("hidden", !recoveryPanelOpen);
   if (fields.toggleRecovery) {
-    fields.toggleRecovery.textContent = recoveryPanelOpen ? "Records" : "Recovery";
+    fields.toggleRecovery.textContent = recoveryPanelOpen ? "Records" : "Archived";
   }
   if (!recoveryPanelOpen) return;
 
@@ -1406,7 +1556,7 @@ function renderRecovery() {
   fields.recoveryList.innerHTML = "";
 
   if (!items.length) {
-    fields.recoveryList.innerHTML = '<div class="draft-empty">No archived or deleted records.</div>';
+    fields.recoveryList.innerHTML = '<div class="draft-empty">No archived records.</div>';
     return;
   }
 
@@ -1453,14 +1603,20 @@ function renderAnswer(record) {
   const canRestoreRecord = Boolean(record && dataMode === "google-sheet" && (recoveryItem || archivedSearchRecord));
   const canDeleteArchivedRecord = Boolean(record && dataMode === "google-sheet" && recoveryItem?.recoveryType === "Archived");
   const archiveReasonOpen = Boolean(canManageRecord && archiveReasonRecordId === record?.id);
+  const canAiMatch = Boolean(aiMatchEnabled && dataMode === "google-sheet" && !draft && !recoveryItem && normalize(fields.query.value) && aiMatchCandidates().length);
 
   fields.publishDraft.classList.toggle("hidden", !canPublishDraft);
   fields.deleteDraft.classList.toggle("hidden", !draft);
   fields.archiveRecord.classList.toggle("hidden", !canManageRecord || archiveReasonOpen);
   fields.deleteRecord.classList.toggle("hidden", !canDeleteArchivedRecord);
   fields.restoreRecord.classList.toggle("hidden", !canRestoreRecord);
+  if (fields.aiMatch) {
+    fields.aiMatch.classList.toggle("hidden", !canAiMatch);
+    fields.aiMatch.disabled = aiMatchState === "loading";
+    fields.aiMatch.textContent = aiMatchState === "loading" ? "Matching..." : "AI Match";
+  }
   if (draft) {
-    fields.publishDraft.textContent = isDraftActionArmed("publish", draft) ? "Confirm Publish" : "Publish Draft";
+    fields.publishDraft.textContent = "Publish Draft";
     fields.deleteDraft.textContent = isDraftActionArmed("delete", draft)
       ? "Confirm Delete"
       : (draft.isUnsaved ? "Discard Draft" : "Delete Draft");
@@ -1486,9 +1642,10 @@ function renderAnswer(record) {
     fields.title.textContent = "No record selected";
     fields.meta.textContent = draftPanelOpen
       ? "Select a draft or create a new one."
-      : (recoveryPanelOpen ? "Select an archived or deleted record." : "Source pending");
+      : (recoveryPanelOpen ? "Select an archived record." : "Source pending");
     fields.reviewMeta.textContent = "Last updated pending";
     fields.answer.innerHTML = "";
+    fields.aiMatch?.classList.add("hidden");
     renderArchiveReasonPanel(false);
     return;
   }
@@ -1549,7 +1706,7 @@ function renderAnswer(record) {
       ` : ""}
       ${record.attachments ? `
       <section class="answer-block">
-        <h3>Attachments / Images</h3>
+        <h3>Attachment Links</h3>
         ${attachmentsHtml}
       </section>
       ` : ""}
@@ -1586,7 +1743,7 @@ function renderAnswer(record) {
       ` : ""}
       ${record.attachments ? `
       <section class="answer-block">
-        <h3>Attachments / Images</h3>
+        <h3>Attachment Links</h3>
         ${attachmentsHtml}
       </section>
       ` : ""}
@@ -1618,7 +1775,7 @@ function renderAnswer(record) {
       ` : ""}
       ${record.attachments ? `
       <section class="answer-block">
-        <h3>Attachments / Images</h3>
+        <h3>Attachment Links</h3>
         ${attachmentsHtml}
       </section>
       ` : ""}
@@ -1635,6 +1792,11 @@ function renderAnswer(record) {
       </section>
       ` : ""}
     `;
+  }
+
+  const aiMatchHtml = renderAiMatchPanel();
+  if (aiMatchHtml) {
+    fields.answer.insertAdjacentHTML("beforeend", aiMatchHtml);
   }
 
   queueRecordView(record);
@@ -1663,7 +1825,7 @@ function renderEditor(record) {
   fields.editor.elements.title.value = record.title;
   fields.editor.elements.department.value = record.department || "Service Desk (Stern)";
   fields.editor.elements.system.value = record.system || record.escalation || "No escalation listed";
-  fields.editor.elements.source.value = record.source;
+  fields.editor.elements.keywords.value = record.keywords || "";
   fields.editor.elements.issues.value = record.issues || "";
   fields.editor.elements.solution.value = record.solution || record.steps.join("\n");
   fields.editor.elements.moreInfo.value = record.moreInfo || "";
@@ -1674,7 +1836,7 @@ function applyEditorValues(record) {
   record.title = fields.editor.elements.title.value.trim() || "Untitled draft";
   record.department = fields.editor.elements.department.value.trim() || "General";
   record.system = fields.editor.elements.system.value.trim() || "No escalation listed";
-  record.source = fields.editor.elements.source.value.trim();
+  record.keywords = fields.editor.elements.keywords.value.trim();
   record.issues = fields.editor.elements.issues.value.trim();
   record.solution = fields.editor.elements.solution.value.trim();
   record.steps = asList(record.solution.replaceAll("\n", "|"));
@@ -1682,7 +1844,6 @@ function applyEditorValues(record) {
   record.attachments = fields.editor.elements.attachments.value.trim();
   record.escalation = record.system;
   record.owner = record.department;
-  record.relatedKbs = record.source;
   record.reviewed = record.reviewed || "Draft";
   return record;
 }
@@ -1696,7 +1857,7 @@ function draftHasMeaningfulContent(record) {
     normalize(record.solution) ||
     normalize(record.moreInfo) ||
     normalize(record.attachments) ||
-    normalize(record.source || record.relatedKbs)
+    normalize(record.keywords)
   );
 }
 
@@ -1708,7 +1869,7 @@ function draftAutosaveSignature(draft, record) {
     title: record?.title || "",
     department: record?.department || "",
     system: record?.system || record?.escalation || "",
-    source: record?.source || record?.relatedKbs || "",
+    keywords: record?.keywords || "",
     issues: record?.issues || "",
     solution: record?.solution || "",
     moreInfo: record?.moreInfo || "",
@@ -1990,6 +2151,7 @@ function resetSelectionAndRender() {
   clearDraftAutosave();
   lastDraftAutosaveSignature = "";
   clearArchiveReason();
+  clearAiMatchState();
   render();
 }
 
@@ -1997,6 +2159,54 @@ fields.query.addEventListener("input", resetSelectionAndRender);
 fields.department.addEventListener("input", resetSelectionAndRender);
 fields.system.addEventListener("input", resetSelectionAndRender);
 fields.outputMode.addEventListener("input", render);
+
+fields.aiMatch?.addEventListener("click", async () => {
+  if (!aiMatchEnabled) {
+    setDataStatus("AI Match disabled", "warning");
+    return;
+  }
+
+  const intake = fields.query.value.trim();
+  const candidates = aiMatchCandidates();
+
+  if (!intake) {
+    setDataStatus("Enter an intake first", "warning");
+    return;
+  }
+
+  if (!candidates.length) {
+    setDataStatus("No records to compare", "warning");
+    return;
+  }
+
+  const signature = aiMatchSignatureFor(intake, candidates);
+  aiMatchState = "loading";
+  aiMatchResult = null;
+  aiMatchError = "";
+  aiMatchSignature = signature;
+  setDataStatus("AI Match running", "warning");
+  renderAnswer(currentRecord());
+
+  try {
+    const result = await aiMatchInBackend(intake, candidates);
+    if (aiMatchSignature !== signature) return;
+    aiMatchState = "ready";
+    aiMatchResult = normalizeAiMatchResult(result);
+    aiMatchError = "";
+    setDataStatus("AI match ready", "ok");
+  } catch (error) {
+    console.error(error);
+    if (aiMatchSignature !== signature) return;
+    aiMatchState = "error";
+    aiMatchResult = null;
+    aiMatchError = /OPENAI_API_KEY/i.test(error.message)
+      ? "AI Match needs an OpenAI API key in Apps Script settings."
+      : (error.message || "AI Match could not run.");
+    setDataStatus("AI Match unavailable", "warning");
+  } finally {
+    renderAnswer(currentRecord());
+  }
+});
 
 document.querySelector("#clearQuery").addEventListener("click", () => {
   fields.query.value = "";
@@ -2111,7 +2321,15 @@ fields.editor.addEventListener("submit", async (event) => {
 fields.publishDraft.addEventListener("click", async () => {
   const draft = currentDraft();
   if (!draft || draft.isUnsaved) return;
-  if (!requireDraftActionConfirmation("publish", draft)) return;
+  clearDraftAutosave();
+  const title = draft.record?.title || "Untitled draft";
+  const confirmed = await openConfirmDialog({
+    title: "Publish this draft?",
+    body: `Draft: ${title}. This will create or update the record in Knowledge.`,
+    confirmText: "Publish Draft",
+    danger: false
+  });
+  if (!confirmed) return;
 
   try {
     setDataStatus("Publishing draft...", "warning");
@@ -2207,7 +2425,7 @@ fields.archiveReasonPanel?.addEventListener("submit", async (event) => {
 
   const confirmed = await openConfirmDialog({
     title: "Archive this record?",
-    body: `Record: ${record.title}. This will move out of active records and into Recovery with the archive reason you entered.`,
+    body: `Record: ${record.title}. This will move out of active records and into Archived with the archive reason you entered.`,
     confirmText: "Archive Record",
     danger: false
   });
@@ -2247,7 +2465,7 @@ fields.deleteRecord.addEventListener("click", async () => {
   if (!record || recoveryItem?.recoveryType !== "Archived") return;
   const confirmed = await openConfirmDialog({
     title: "Delete this archived record?",
-    body: `Record: ${record.title}. This will move from Archived to Deleted Records. Use this only when it is no longer needed.`,
+    body: `Record: ${record.title}. This will remove it from Archived and keep a backend deletion record. Use this only when it is no longer needed.`,
     confirmText: "Delete Record"
   });
   if (!confirmed) return;
@@ -2261,8 +2479,13 @@ fields.deleteRecord.addEventListener("click", async () => {
     ];
     records = records.filter((item) => item.id !== record.id);
     editorOpen = false;
-    enterRecoveryWorkspace(recoveryRecordKey("Deleted", deletedRecord.id));
-    setDataStatus("Record moved to Deleted Records", "ok");
+    const remainingRecoveryItems = recoveryItems();
+    if (remainingRecoveryItems.length) {
+      enterRecoveryWorkspace(recoveryKey(remainingRecoveryItems[0]));
+    } else {
+      enterRecordWorkspace();
+    }
+    setDataStatus("Record deleted", "ok");
     writeBackendCache();
     render();
   } catch (error) {

@@ -5,6 +5,13 @@ const DRAFT_SHEET = "Drafts";
 const DELETED_SHEET = "Deleted Records";
 const RECORD_VIEWS_SHEET = "Record Views";
 const MAX_EMBEDDED_IMAGE_BYTES = 1500000;
+const AI_MATCH_ENABLED_PROPERTY = "AI_MATCH_ENABLED";
+const OPENAI_API_KEY_PROPERTY = "OPENAI_API_KEY";
+const OPENAI_MODEL_PROPERTY = "OPENAI_MODEL";
+const DEFAULT_OPENAI_MODEL = "gpt-5.5";
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const AI_MATCH_MAX_CANDIDATES = 5;
+const AI_MATCH_MAX_TEXT_LENGTH = 1200;
 
 const KNOWLEDGE_HEADERS = [
   "ID",
@@ -19,6 +26,7 @@ const KNOWLEDGE_HEADERS = [
   "Escalation",
   "Status",
   "Archive Reason",
+  "Published At",
   "Updated At",
   "Updated By"
 ];
@@ -175,6 +183,10 @@ function doPost(e) {
       return jsonResponse({ ok: true, record: publishDraft_(payload.draftId || "", payload.version || "") });
     }
 
+    if (action === "aiMatch") {
+      return jsonResponse({ ok: true, match: aiMatch_(payload) });
+    }
+
     if (action === "health") {
       return jsonResponse({
         ok: true,
@@ -319,6 +331,7 @@ function saveRecord_(incomingRecord) {
 
     record.updatedAt = new Date().toISOString();
     record.updatedBy = getEditorEmail_();
+    record.publishedAt = record.publishedAt || (before ? before.publishedAt : "") || (before ? "" : record.updatedAt);
 
     const nextRow = recordToRow_(headers, record, existingRow);
     if (rowNumber) {
@@ -674,6 +687,7 @@ function publishDraft_(draftId, version) {
     record.id = selected.draft.recordId || record.id || Utilities.getUuid();
     record.updatedAt = new Date().toISOString();
     record.updatedBy = getEditorEmail_();
+    record.publishedAt = record.updatedAt;
 
     const rowNumber = findRowById_(knowledgeSheet, recordHeaders, record.id);
     const existingRow = rowNumber ? knowledgeSheet.getRange(rowNumber, 1, 1, recordHeaders.length).getValues()[0] : null;
@@ -715,6 +729,7 @@ function normalizeIncomingRecord_(record) {
     escalation,
     status: value_(record.status) || "Active",
     archiveReason: value_(record.archiveReason),
+    publishedAt: value_(record.publishedAt),
     updatedAt: value_(record.updatedAt),
     updatedBy: value_(record.updatedBy)
   };
@@ -750,6 +765,7 @@ function rowToRecord_(headers, row) {
     relatedKbs,
     status: data["Status"] || "Active",
     archiveReason: data["Archive Reason"] || "",
+    publishedAt: data["Published At"] || "",
     updatedAt: data["Updated At"] || "",
     updatedBy: data["Updated By"] || ""
   };
@@ -769,6 +785,7 @@ function recordToRow_(headers, record, existingRow) {
   setCell_(headers, row, "Escalation", record.escalation);
   setCell_(headers, row, "Status", record.status);
   setCell_(headers, row, "Archive Reason", record.archiveReason);
+  setCell_(headers, row, "Published At", record.publishedAt);
   setCell_(headers, row, "Updated At", record.updatedAt);
   setCell_(headers, row, "Updated By", record.updatedBy);
   return row;
@@ -1125,6 +1142,167 @@ function columnName_(columnNumber) {
 
 function quoteSheetName_(name) {
   return `'${String(name).replace(/'/g, "''")}'`;
+}
+
+function aiMatch_(payload) {
+  const enabled = value_(PropertiesService.getScriptProperties().getProperty(AI_MATCH_ENABLED_PROPERTY)).toLowerCase() === "true";
+  if (!enabled) throw new Error("AI Match is disabled. Set AI_MATCH_ENABLED to true in script properties to enable it.");
+
+  const intake = clipAiText_(payload.intake || "", 1800);
+  const candidates = (payload.candidates || [])
+    .slice(0, AI_MATCH_MAX_CANDIDATES)
+    .map(sanitizeAiCandidate_)
+    .filter((candidate) => candidate.recordId || candidate.title);
+
+  if (!intake) throw new Error("AI Match needs inquiry text.");
+  if (!candidates.length) throw new Error("AI Match needs at least one candidate record.");
+
+  const apiKey = value_(PropertiesService.getScriptProperties().getProperty(OPENAI_API_KEY_PROPERTY));
+  if (!apiKey) throw new Error("Missing OPENAI_API_KEY script property.");
+
+  const body = {
+    model: openAiModel_(),
+    instructions: [
+      "You are helping the Stern IT Service Desk compare a user intake against existing internal records.",
+      "Use only the provided candidate records. Do not invent record titles, policies, steps, or links.",
+      "Return concise JSON. If no candidate is a strong fit, set confidence to Low and explain what is missing.",
+      "The output is advisory; a human technician will decide which record to use."
+    ].join(" "),
+    input: JSON.stringify({ intake, candidates }, null, 2),
+    text: {
+      format: {
+        type: "json_schema",
+        name: "ai_match_result",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            bestMatch: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                recordId: { type: "string" },
+                title: { type: "string" },
+                confidence: { type: "string", enum: ["High", "Medium", "Low"] },
+                why: { type: "string" }
+              },
+              required: ["recordId", "title", "confidence", "why"]
+            },
+            alternateMatches: {
+              type: "array",
+              maxItems: 3,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  recordId: { type: "string" },
+                  title: { type: "string" },
+                  confidence: { type: "string", enum: ["High", "Medium", "Low"] },
+                  why: { type: "string" }
+                },
+                required: ["recordId", "title", "confidence", "why"]
+              }
+            },
+            missingInfo: {
+              type: "array",
+              maxItems: 4,
+              items: { type: "string" }
+            },
+            notes: { type: "string" }
+          },
+          required: ["bestMatch", "alternateMatches", "missingInfo", "notes"]
+        }
+      }
+    }
+  };
+
+  const response = UrlFetchApp.fetch(OPENAI_RESPONSES_URL, {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      Authorization: `Bearer ${apiKey}`
+    },
+    payload: JSON.stringify(body),
+    muteHttpExceptions: true
+  });
+
+  const status = response.getResponseCode();
+  const responseText = response.getContentText();
+  if (status < 200 || status >= 300) {
+    throw new Error(`OpenAI request failed: ${status} ${responseText.slice(0, 300)}`);
+  }
+
+  const parsed = JSON.parse(responseText);
+  return normalizeAiMatch_(JSON.parse(extractOpenAiText_(parsed)));
+}
+
+function openAiModel_() {
+  return value_(PropertiesService.getScriptProperties().getProperty(OPENAI_MODEL_PROPERTY)) || DEFAULT_OPENAI_MODEL;
+}
+
+function sanitizeAiCandidate_(candidate) {
+  return {
+    rank: Number(candidate.rank || 0),
+    score: Number(candidate.score || 0),
+    recordId: clipAiText_(candidate.recordId, 120),
+    title: clipAiText_(candidate.title, 200),
+    universityService: clipAiText_(candidate.universityService, 200),
+    escalation: clipAiText_(candidate.escalation, 200),
+    keywords: clipAiText_(candidate.keywords, 300),
+    mainIssue: clipAiText_(candidate.mainIssue, AI_MATCH_MAX_TEXT_LENGTH),
+    resolution: clipAiText_(candidate.resolution, AI_MATCH_MAX_TEXT_LENGTH),
+    notes: clipAiText_(candidate.notes, 700),
+    attachmentLinks: clipAiText_(candidate.attachmentLinks, 400),
+    archived: Boolean(candidate.archived)
+  };
+}
+
+function normalizeAiMatch_(result) {
+  const best = result.bestMatch || {};
+  return {
+    bestMatch: {
+      recordId: value_(best.recordId),
+      title: value_(best.title) || "No strong match",
+      confidence: aiConfidence_(best.confidence),
+      why: value_(best.why) || "No rationale returned."
+    },
+    alternateMatches: (result.alternateMatches || []).slice(0, 3).map((item) => ({
+      recordId: value_(item.recordId),
+      title: value_(item.title),
+      confidence: aiConfidence_(item.confidence),
+      why: value_(item.why)
+    })).filter((item) => item.title || item.why),
+    missingInfo: (result.missingInfo || []).slice(0, 4).map(value_).filter(Boolean),
+    notes: value_(result.notes)
+  };
+}
+
+function aiConfidence_(value) {
+  const confidence = value_(value);
+  return ["High", "Medium", "Low"].indexOf(confidence) >= 0 ? confidence : "Low";
+}
+
+function clipAiText_(value, maxLength) {
+  const text = value_(value).replace(/\s+/g, " ").trim();
+  if (!maxLength || text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 3).trim()}...`;
+}
+
+function extractOpenAiText_(payload) {
+  if (payload.output_text) return value_(payload.output_text);
+
+  const parts = [];
+  (payload.output || []).forEach((item) => {
+    (item.content || []).forEach((content) => {
+      if (content.text) parts.push(content.text);
+      if (content.type === "output_text" && content.output_text) parts.push(content.output_text);
+    });
+  });
+
+  const text = parts.join("\n").trim();
+  if (!text) throw new Error("OpenAI returned no match text.");
+  return text.replace(/^\`\`\`(?:json)?\s*/i, "").replace(/\s*\`\`\`$/i, "");
 }
 
 function splitSteps_(value) {
